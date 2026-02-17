@@ -1,18 +1,9 @@
-// sketch.js
+// sketch.js (Aesthetic + video-sized canvas + overlay prediction)
 // ml5 v1 HandPose + kNN (distance-weighted) classifier for ASL letters
 // + localStorage persistence + undo + export/import JSON
-// + NONE class + better features (XY only + rotation normalization) + confidence+margin gating
-// + record mode via "-" key (press/hold to capture), hold-to-add debounce, robust import
-//
-// Keys:
-// A–Z       → add example for that letter (auto-saves)
-// N         → add example for NONE / REST class (auto-saves)
-// "-"       → toggle RECORD mode (then HOLD a label key to record repeatedly)
-// "."       → undo last added example (auto-saves)
-// SPACE     → toggle prediction
-// BACKSPACE → clear dataset + delete saved data
-// 1         → export dataset JSON (download)
-// 0         → import dataset JSON (upload)
+// + NONE class + XY-only + rotation normalization + confidence+margin gating
+// + record mode via "-" key, hold-to-add debounce, robust import
+// + UPDATED: remove bottom info panel, crop canvas to video size, overlay prediction badge
 
 let video;
 let handPose;
@@ -26,7 +17,8 @@ const ALL_LABELS = [...LABELS, NONE_LABEL];
 const examples = {};
 ALL_LABELS.forEach((l) => (examples[l] = []));
 
-const STORAGE_KEY = "asl_handpose_examples_v2";
+// bumped because visuals + single-hand selection behavior is assumed
+const STORAGE_KEY = "asl_handpose_examples_v5_cleanui_singlehand";
 
 // Undo stack
 let addHistory = [];
@@ -62,31 +54,48 @@ let lastAddAt = 0;
 
 const held = {};
 
+// ----- SINGLE-HAND SELECTION -----
+// If both hands are visible, we deterministically choose one.
+const TRACK_HAND = "RIGHT"; // "RIGHT" or "LEFT"
+
+// ----- Visual config -----
+const VID_W = 640;
+const VID_H = 480;
+
+// Badge styling
+const BADGE_SIZE = 92;
+const BADGE_PAD = 14;
+
+// Minimal HUD
+const HUD_PAD = 12;
+const HUD_H = 34;
+
 function preload() {
-  const options = { maxHands: 1, flipped: true };
+  // maxHands: 2 so we can choose left/right deterministically, but we only USE ONE
+  const options = { maxHands: 2, flipped: true };
   handPose = ml5.handPose(options);
 }
 
 function setup() {
-  createCanvas(900, 650);
+  createCanvas(VID_W, VID_H);
+  pixelDensity(1);
 
-  // Hidden file picker for import
   importInput = createFileInput(handleImport, false);
   importInput.hide();
-  // accept only json files (best-effort; not all browsers enforce)
   importInput.elt.accept = ".json,application/json";
 
-  // Load saved dataset (if any)
   const loaded = loadDataset();
   statusMsg = loaded
-    ? `Loaded saved dataset ✅ (${totalExamples()} examples)`
-    : "No saved dataset — train NONE with N, then letters A–Z";
+    ? `Loaded ✅ (${totalExamples()} ex)`
+    : "Train NONE with N, then letters A–Z";
 
   video = createCapture(VIDEO);
-  video.size(640, 480);
+  video.size(VID_W, VID_H);
   video.hide();
 
   handPose.detectStart(video, gotHands);
+
+  textFont("system-ui, -apple-system, Segoe UI, Roboto, Arial");
 }
 
 function gotHands(results) {
@@ -94,18 +103,22 @@ function gotHands(results) {
 }
 
 function draw() {
-  background(15);
+  background(0);
 
-  // Mirror video on canvas
+  // Webcam (mirrored)
   push();
-  translate(650, 20);
+  translate(width, 0);
   scale(-1, 1);
-  image(video, 0, 0, 640, 480);
+  image(video, 0, 0, width, height);
   pop();
 
+  // subtle overlay for aesthetic contrast
+  drawVignette();
+
+  // hand points (clean + minimal)
   drawHandKeypoints();
 
-  const feats = getHandFeatures();
+  const feats = getHandFeaturesSingle();
 
   // record mode capture loop
   if (recordMode && recordLabel) {
@@ -115,13 +128,14 @@ function draw() {
       lastRecordAt = now;
 
       if (ok) {
-        statusMsg = `REC ● ${recordLabel === NONE_LABEL ? "NONE" : recordLabel} (+1)  |  total ${totalExamples()}`;
+        statusMsg = `REC ● ${recordLabel === NONE_LABEL ? "NONE" : recordLabel} (+1)`;
       } else {
-        statusMsg = "REC ● No hand detected — adjust lighting / distance";
+        statusMsg = "REC ● No hand detected";
       }
     }
   }
 
+  // prediction
   if (isPredicting && feats && totalExamples() > 0) {
     const res = classifyKNN(feats);
     if (res) {
@@ -133,21 +147,147 @@ function draw() {
     }
   }
 
-  drawUI(feats);
+  // overlay visuals
+  drawPredictionBadge();
+  drawHUD(feats);
+}
+
+/* -------------------- visuals -------------------- */
+
+function drawVignette() {
+  // soft dark corners
+  push();
+  noStroke();
+  // top
+  fill(0, 120);
+  rect(0, 0, width, 40);
+  // bottom
+  fill(0, 90);
+  rect(0, height - 50, width, 50);
+  // left
+  fill(0, 60);
+  rect(0, 0, 24, height);
+  // right
+  fill(0, 60);
+  rect(width - 24, 0, 24, height);
+  pop();
+}
+
+function drawHUD(feats) {
+  // minimal top-left pill
+  const txt =
+    (recordMode ? "REC ON" : "REC OFF") +
+    `  |  predict ${isPredicting ? "ON" : "OFF"}` +
+    `  |  hand ${feats ? "yes" : "no"}` +
+    `  |  ex ${totalExamples()}`;
+
+  push();
+  noStroke();
+  fill(0, 160);
+  rect(HUD_PAD, HUD_PAD, textWidthSafe(txt) + 18, HUD_H, 999);
+
+  fill(255);
+  textAlign(LEFT, CENTER);
+  textSize(13);
+  text(txt, HUD_PAD + 10, HUD_PAD + HUD_H / 2 + 1);
+
+  // transient status line (below pill)
+  if (statusMsg) {
+    fill(255, 200);
+    textSize(12);
+    text(statusMsg, HUD_PAD + 10, HUD_PAD + HUD_H + 14);
+  }
+  pop();
+}
+
+function drawPredictionBadge() {
+  if (!isPredicting || totalExamples() === 0) return;
+
+  const sm = getSmoothedLabel(); // { label, conf, stable }
+  if (!sm.label) return;
+
+  // hide NONE
+  if (sm.label === NONE_LABEL) return;
+
+  const x = width - BADGE_PAD - BADGE_SIZE;
+  const y = BADGE_PAD;
+
+  push();
+  // drop shadow
+  noStroke();
+  fill(0, 140);
+  rect(x + 3, y + 4, BADGE_SIZE, BADGE_SIZE, 18);
+
+  // card
+  fill(20, 20, 24, 210);
+  rect(x, y, BADGE_SIZE, BADGE_SIZE, 18);
+
+  // accent top strip
+  fill(255, 255, 255, 18);
+  rect(x, y, BADGE_SIZE, 18, 18, 18, 0, 0);
+
+  // letter
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textStyle(BOLD);
+  textSize(52);
+  text(sm.label, x + BADGE_SIZE / 2, y + BADGE_SIZE / 2 + 2);
+
+  // confidence + stable
+  textStyle(NORMAL);
+  textSize(12);
+  fill(220);
+  const c = nf(sm.conf, 1, 2);
+  const tag = sm.stable ? "stable" : "…";
+  text(`${c} ${tag}`, x + BADGE_SIZE / 2, y + BADGE_SIZE - 16);
+
+  pop();
+}
+
+function textWidthSafe(s) {
+  push();
+  textSize(13);
+  const w = textWidth(s);
+  pop();
+  return w;
+}
+
+/* -------------------- hand selection + keypoints -------------------- */
+
+function getWristX(hand) {
+  const w = hand?.keypoints?.[0];
+  return w?.x ?? 0;
+}
+
+function getValidHands(rawHands) {
+  return (rawHands || []).filter((h) => h?.keypoints && h.keypoints.length === 21);
+}
+
+function sortHandsLeftToRight(rawHands) {
+  const valid = getValidHands(rawHands);
+  valid.sort((a, b) => getWristX(a) - getWristX(b));
+  return valid;
+}
+
+function pickTrackedHand(rawHands) {
+  const sorted = sortHandsLeftToRight(rawHands);
+  if (sorted.length === 0) return null;
+  if (sorted.length === 1) return sorted[0];
+  return TRACK_HAND === "RIGHT" ? sorted[sorted.length - 1] : sorted[0];
 }
 
 function drawHandKeypoints() {
-  if (!hands.length) return;
-  const hand = hands[0];
-  if (!hand?.keypoints || hand.keypoints.length !== 21) return;
+  const hand = pickTrackedHand(hands);
+  if (!hand) return;
 
   push();
-  translate(650, 20);
-  stroke(255, 200);
-  strokeWeight(6);
+  // small, clean points
+  stroke(255, 190);
+  strokeWeight(5);
 
   for (const kp of hand.keypoints) {
-    const mx = 640 - kp.x;
+    // because we displayed mirrored, mirror x for overlay
+    const mx = width - kp.x;
     point(mx, kp.y);
   }
   pop();
@@ -157,13 +297,9 @@ function getLandmarks21(hand) {
   return hand.keypoints.map((k) => [k.x, k.y, k.z ?? 0]);
 }
 
-// XY only + rotation normalization
-function getHandFeatures() {
-  if (!hands.length) return null;
+/* -------------------- features -------------------- */
 
-  const hand = hands[0];
-  if (!hand?.keypoints || hand.keypoints.length !== 21) return null;
-
+function handToFeatsXYRotNorm(hand) {
   const lm = getLandmarks21(hand);
 
   const wrist = lm[0];
@@ -193,7 +329,14 @@ function getHandFeatures() {
   return feats;
 }
 
-// ---------- INPUT ----------
+function getHandFeaturesSingle() {
+  const hand = pickTrackedHand(hands);
+  if (!hand) return null;
+  return handToFeatsXYRotNorm(hand);
+}
+
+/* -------------------- input -------------------- */
+
 function keyTyped() {
   const k = key.toUpperCase();
 
@@ -202,7 +345,7 @@ function keyTyped() {
     return;
   }
 
-  if (k === "/") {
+  if (k === "N") {
     if (!recordMode) addExample(NONE_LABEL);
     return;
   }
@@ -220,14 +363,14 @@ function keyTyped() {
 
   if (k === "1") {
     exportDataset();
-    statusMsg = "Exported dataset JSON ✅";
+    statusMsg = "Exported JSON ✅";
     return;
   }
 
   if (k === "0") {
     importInput.elt.value = "";
     importInput.show();
-    statusMsg = "Choose a dataset JSON file to import…";
+    statusMsg = "Choose a dataset JSON file…";
     return;
   }
 }
@@ -244,7 +387,7 @@ function keyPressed() {
       recordLabel = null;
       statusMsg = "Record mode OFF";
     } else {
-      statusMsg = "Record mode ON — hold A–Z or N to record repeatedly";
+      statusMsg = "Record mode ON — hold A–Z or N";
     }
     return false;
   }
@@ -256,11 +399,11 @@ function keyPressed() {
     if (LABELS.includes(k)) {
       recordLabel = k;
       lastRecordAt = 0;
-      statusMsg = `REC ● ${k} (hold to record)`;
-    } else if (k === "N") { // ✅ FIX: was "/" in your pasted file
+      statusMsg = `REC ● ${k}`;
+    } else if (k === "N") {
       recordLabel = NONE_LABEL;
       lastRecordAt = 0;
-      statusMsg = `REC ● NONE (hold to record)`;
+      statusMsg = "REC ● NONE";
     }
   }
 }
@@ -274,19 +417,21 @@ function keyReleased() {
     const wasNone = k === "N" && recordLabel === NONE_LABEL;
     if (wasLetter || wasNone) {
       recordLabel = null;
-      statusMsg = "REC ● paused (hold a label key to continue)";
+      statusMsg = "REC ● paused";
     }
   }
 }
+
+/* -------------------- dataset ops -------------------- */
 
 function addExample(label, opts = {}) {
   const now = millis();
   if (!opts.silent && now - lastAddAt < ADD_DEBOUNCE_MS) return false;
   lastAddAt = now;
 
-  const feats = getHandFeatures();
+  const feats = getHandFeaturesSingle();
   if (!feats) {
-    if (!opts.silent) statusMsg = "No hand detected — move closer, better light, open palm first";
+    if (!opts.silent) statusMsg = "No hand detected";
     return false;
   }
 
@@ -297,8 +442,8 @@ function addExample(label, opts = {}) {
   if (!opts.silent) {
     statusMsg =
       label === NONE_LABEL
-        ? `Added example for NONE (now ${examples[NONE_LABEL].length}) — saved ✅`
-        : `Added example for ${label} (now ${examples[label].length}) — saved ✅`;
+        ? `Added NONE (${examples[NONE_LABEL].length})`
+        : `Added ${label} (${examples[label].length})`;
   }
   return true;
 }
@@ -313,10 +458,10 @@ function undoLast() {
   if (examples[label].length > 0) {
     examples[label].pop();
     saveDataset();
-    statusMsg = `Undid last add: ${label} — saved ✅`;
+    statusMsg = `Undo: ${label}`;
   } else {
     saveDataset();
-    statusMsg = "Undo did nothing (dataset already empty)";
+    statusMsg = "Undo did nothing";
   }
 }
 
@@ -332,21 +477,27 @@ function clearAll() {
   recordMode = false;
 
   localStorage.removeItem(STORAGE_KEY);
-  statusMsg = "Cleared dataset + deleted saved data ✅";
+  statusMsg = "Cleared dataset ✅";
 }
 
 function totalExamples() {
   return ALL_LABELS.reduce((sum, l) => sum + (examples[l]?.length || 0), 0);
 }
 
-// ---------- Persistence ----------
+/* -------------------- persistence -------------------- */
+
 function saveDataset() {
   const payload = {
-    version: 2,
+    version: 5,
     savedAt: new Date().toISOString(),
     examples: examples,
     addHistory: addHistory,
-    meta: { feature: "xy_rot_norm", k: K }
+    meta: {
+      feature: "xy_rot_norm_singlehand",
+      trackHand: TRACK_HAND,
+      dims: 42,
+      k: K
+    }
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
@@ -379,35 +530,36 @@ function loadDataset() {
   }
 }
 
-// ---------- Export / Import ----------
+/* -------------------- export / import -------------------- */
+
 function exportDataset() {
   const payload = {
-    version: 2,
+    version: 5,
     savedAt: new Date().toISOString(),
     examples: examples,
     addHistory: addHistory,
-    meta: { feature: "xy_rot_norm", k: K }
+    meta: {
+      feature: "xy_rot_norm_singlehand",
+      trackHand: TRACK_HAND,
+      dims: 42,
+      k: K
+    }
   };
-  saveJSON(payload, "asl_handpose_dataset.json");
+  saveJSON(payload, "asl_handpose_dataset_singlehand.json");
 }
 
-// Robust JSON extraction for p5 createFileInput
 function parseMaybeJSON(file) {
-  // Case 1: p5 already gave us an object
   if (file && typeof file.data === "object" && file.data !== null) return file.data;
 
-  // Case 2: raw text JSON
   if (file && typeof file.data === "string") {
     const s = file.data.trim();
 
-    // DataURL base64
     if (s.startsWith("data:")) {
       const comma = s.indexOf(",");
       if (comma === -1) throw new Error("Malformed data URL");
       const meta = s.slice(0, comma);
       const b64 = s.slice(comma + 1);
 
-      // if it's base64, decode; otherwise it's URL-encoded text
       if (meta.includes(";base64")) {
         const txt = atob(b64);
         return JSON.parse(txt);
@@ -417,7 +569,6 @@ function parseMaybeJSON(file) {
       }
     }
 
-    // Plain JSON string
     return JSON.parse(s);
   }
 
@@ -434,7 +585,7 @@ function handleImport(file) {
 
   try {
     const payload = parseMaybeJSON(file);
-    if (!payload || !payload.examples) throw new Error("Missing 'examples' in JSON");
+    if (!payload || !payload.examples) throw new Error("Missing 'examples'");
 
     ALL_LABELS.forEach((l) => {
       const arr = payload.examples[l];
@@ -452,13 +603,14 @@ function handleImport(file) {
     recordLabel = null;
     recordMode = false;
 
-    statusMsg = `Imported ✅ (${totalExamples()} examples)`;
+    statusMsg = `Imported ✅ (${totalExamples()} ex)`;
   } catch (e) {
     statusMsg = `Import failed — ${e.message || "invalid JSON"}`;
   }
 }
 
-// -------- kNN classifier (distance-weighted) + gating --------
+/* -------------------- kNN (distance-weighted) + gating -------------------- */
+
 function l2Distance(a, b) {
   let s = 0;
   for (let i = 0; i < a.length; i++) {
@@ -491,8 +643,10 @@ function classifyKNN(feats) {
     scores[label] = (scores[label] || 0) + w;
   }
 
-  let bestLabel = null, bestScore = -Infinity;
-  let secondLabel = null, secondScore = -Infinity;
+  let bestLabel = null,
+    bestScore = -Infinity;
+  let secondLabel = null,
+    secondScore = -Infinity;
 
   for (const label of Object.keys(scores)) {
     const s = scores[label];
@@ -527,14 +681,16 @@ function classifyKNN(feats) {
   return { label: bestLabel, conf, best: bestLabel, second: secondLabel, scores };
 }
 
-// -------- UI --------
+/* -------------------- smoothing -------------------- */
+
 function getSmoothedLabel() {
   if (!lastLabel) return { label: null, conf: 0, stable: false };
 
   const counts = {};
   for (const l of smoothQueue) counts[l] = (counts[l] || 0) + 1;
 
-  let best = null, bestCount = 0;
+  let best = null,
+    bestCount = 0;
   for (const [l, c] of Object.entries(counts)) {
     if (c > bestCount) {
       best = l;
@@ -544,42 +700,4 @@ function getSmoothedLabel() {
 
   const stable = bestCount >= STABLE_MIN && lastConf >= MIN_CONF;
   return { label: best, conf: lastConf, stable };
-}
-
-function drawUI(feats) {
-  fill(25);
-  noStroke();
-  rect(20, 520, 860, 120, 16);
-
-  fill(240);
-  textSize(16);
-  textAlign(LEFT, TOP);
-
-  text(
-    `Status: ${statusMsg}\n` +
-      `Train: A–Z | NONE: N | Record: "-" (${recordMode ? "ON" : "OFF"}) | Undo: . | Export: 1 | Import: 0 | [space] predict ${isPredicting ? "ON" : "OFF"} | Backspace: clear\n` +
-      `Hand: ${feats ? "yes" : "no"} | Total: ${totalExamples()} | NONE: ${examples[NONE_LABEL].length}\n` +
-      `kNN: k=${K} | gate: conf>=${MIN_CONF}, margin>=${MIN_MARGIN} | REC every ${RECORD_EVERY_MS}ms`,
-    35,
-    535
-  );
-
-  const sm = getSmoothedLabel();
-  textSize(30);
-
-  const shown = sm.label ? sm.label : "—";
-  const shownPretty = shown === NONE_LABEL ? "NONE" : shown;
-
-  text(`Prediction: ${shownPretty}${sm.stable ? " (stable)" : ""}`, 35, 595);
-
-  textSize(16);
-  text(`conf: ${nf(sm.conf, 1, 2)}`, 320, 605);
-
-  fill(200);
-  textSize(14);
-  text(
-    "Tip: Train NONE a lot (rest + transitions). If it misfires, add more NONE and/or raise MIN_CONF/MIN_MARGIN.",
-    35,
-    622
-  );
 }
