@@ -2,22 +2,17 @@
 // ml5 v1 HandPose + kNN (distance-weighted) classifier for ASL letters
 // + localStorage persistence + undo + export/import JSON
 // + NONE class + better features (XY only + rotation normalization) + confidence+margin gating
-// + NEW: record mode via "-" key (press/hold to capture), hold-to-add debounce, small UX fixes
+// + record mode via "-" key (press/hold to capture), hold-to-add debounce, robust import
 //
 // Keys:
 // A–Z       → add example for that letter (auto-saves)
 // N         → add example for NONE / REST class (auto-saves)
-// "-"       → toggle RECORD mode (then HOLD a label key to record repeatedly) ✅
+// "-"       → toggle RECORD mode (then HOLD a label key to record repeatedly)
 // "."       → undo last added example (auto-saves)
 // SPACE     → toggle prediction
 // BACKSPACE → clear dataset + delete saved data
 // 1         → export dataset JSON (download)
 // 0         → import dataset JSON (upload)
-//
-// Notes:
-// - Start by training NONE a bunch (rest hand, transitions, off-pose).
-// - Then train letters. Keep classes roughly balanced.
-// - If it "gets worse" as you add data, it's usually because NONE is under-trained or data is messy.
 
 let video;
 let handPose;
@@ -33,7 +28,7 @@ ALL_LABELS.forEach((l) => (examples[l] = []));
 
 const STORAGE_KEY = "asl_handpose_examples_v2";
 
-// Undo stack: stores label for each added example, in order
+// Undo stack
 let addHistory = [];
 
 // File input for importing JSON backups
@@ -57,16 +52,15 @@ const EPS = 1e-6;
 
 let statusMsg = "loading HandPose...";
 
-// -------- NEW: Record mode ("-" key) --------
-let recordMode = false;            // toggled by "-"
-let recordLabel = null;            // currently held label in record mode
+// Record mode ("-" key)
+let recordMode = false;
+let recordLabel = null;
 let lastRecordAt = 0;
-const RECORD_EVERY_MS = 140;       // how fast we add examples while holding a label
-const ADD_DEBOUNCE_MS = 180;       // prevents accidental double-adds on taps
+const RECORD_EVERY_MS = 140;
+const ADD_DEBOUNCE_MS = 180;
 let lastAddAt = 0;
 
-// -------- NEW: simple key state --------
-const held = {}; // held["A"]=true, held["N"]=true, etc.
+const held = {};
 
 function preload() {
   const options = { maxHands: 1, flipped: true };
@@ -77,8 +71,10 @@ function setup() {
   createCanvas(900, 650);
 
   // Hidden file picker for import
-  importInput = createFileInput(handleImport);
+  importInput = createFileInput(handleImport, false);
   importInput.hide();
+  // accept only json files (best-effort; not all browsers enforce)
+  importInput.elt.accept = ".json,application/json";
 
   // Load saved dataset (if any)
   const loaded = loadDataset();
@@ -100,7 +96,7 @@ function gotHands(results) {
 function draw() {
   background(15);
 
-  // Mirror video on canvas for a "selfie" view
+  // Mirror video on canvas
   push();
   translate(650, 20);
   scale(-1, 1);
@@ -111,11 +107,11 @@ function draw() {
 
   const feats = getHandFeatures();
 
-  // -------- NEW: record mode capture loop --------
+  // record mode capture loop
   if (recordMode && recordLabel) {
     const now = millis();
     if (now - lastRecordAt >= RECORD_EVERY_MS) {
-      const ok = addExample(recordLabel, { silent: true }); // don't spam status
+      const ok = addExample(recordLabel, { silent: true });
       lastRecordAt = now;
 
       if (ok) {
@@ -142,7 +138,6 @@ function draw() {
 
 function drawHandKeypoints() {
   if (!hands.length) return;
-
   const hand = hands[0];
   if (!hand?.keypoints || hand.keypoints.length !== 21) return;
 
@@ -152,10 +147,9 @@ function drawHandKeypoints() {
   strokeWeight(6);
 
   for (const kp of hand.keypoints) {
-    const mx = 640 - kp.x; // mirror x to match displayed video
+    const mx = 640 - kp.x;
     point(mx, kp.y);
   }
-
   pop();
 }
 
@@ -163,10 +157,7 @@ function getLandmarks21(hand) {
   return hand.keypoints.map((k) => [k.x, k.y, k.z ?? 0]);
 }
 
-// --- Feature engineering: XY only + rotation normalization ---
-// 1) translate by wrist
-// 2) scale by wrist->middle_mcp distance
-// 3) rotate so wrist->middle_mcp points "up" (negative Y)
+// XY only + rotation normalization
 function getHandFeatures() {
   if (!hands.length) return null;
 
@@ -184,7 +175,6 @@ function getHandFeatures() {
 
   const scale = Math.sqrt(dx * dx + dy * dy) || 1;
 
-  // rotate so (dx,dy) becomes (0,-1)
   const ang = Math.atan2(dy, dx);
   const rot = (-Math.PI / 2) - ang;
   const cosR = Math.cos(rot);
@@ -204,43 +194,36 @@ function getHandFeatures() {
 }
 
 // ---------- INPUT ----------
-// NOTE: keyTyped doesn't fire reliably for "-" across layouts, so we handle record toggle in keyPressed.
 function keyTyped() {
   const k = key.toUpperCase();
 
-  // Train letters (tap-to-add, unless recordMode is ON)
   if (LABELS.includes(k)) {
     if (!recordMode) addExample(k);
     return;
   }
 
-  // Train NONE (tap-to-add, unless recordMode is ON)
-  if (k === "N") {
+  if (k === "/") {
     if (!recordMode) addExample(NONE_LABEL);
     return;
   }
 
-  // Undo last added
   if (k === ".") {
     undoLast();
     return;
   }
 
-  // Toggle prediction
   if (k === " ") {
     isPredicting = !isPredicting;
     statusMsg = isPredicting ? "Prediction ON" : "Prediction OFF";
     return;
   }
 
-  // Export dataset JSON
   if (k === "1") {
     exportDataset();
     statusMsg = "Exported dataset JSON ✅";
     return;
   }
 
-  // Import dataset JSON
   if (k === "0") {
     importInput.elt.value = "";
     importInput.show();
@@ -249,20 +232,14 @@ function keyTyped() {
   }
 }
 
-// Clear with BACKSPACE (and clear storage) + RECORD toggle + hold handling
 function keyPressed() {
-  // Prevent browser back-nav
   if (keyCode === BACKSPACE) {
     clearAll();
     return false;
   }
 
-  // Toggle record mode with "-"
-  // (key can be "-" or "_" depending on shift; also keyCode 189 in many browsers)
   if (key === "-" || key === "_") {
     recordMode = !recordMode;
-
-    // when turning off, stop recording immediately
     if (!recordMode) {
       recordLabel = null;
       statusMsg = "Record mode OFF";
@@ -272,16 +249,15 @@ function keyPressed() {
     return false;
   }
 
-  // Track held keys for record mode
   const k = key.toUpperCase();
   held[k] = true;
 
   if (recordMode) {
     if (LABELS.includes(k)) {
       recordLabel = k;
-      lastRecordAt = 0; // record immediately
+      lastRecordAt = 0;
       statusMsg = `REC ● ${k} (hold to record)`;
-    } else if (k === "/") {
+    } else if (k === "N") { // ✅ FIX: was "/" in your pasted file
       recordLabel = NONE_LABEL;
       lastRecordAt = 0;
       statusMsg = `REC ● NONE (hold to record)`;
@@ -293,7 +269,6 @@ function keyReleased() {
   const k = key.toUpperCase();
   held[k] = false;
 
-  // If the released key was driving recording, stop
   if (recordMode) {
     const wasLetter = LABELS.includes(k) && recordLabel === k;
     const wasNone = k === "N" && recordLabel === NONE_LABEL;
@@ -320,11 +295,10 @@ function addExample(label, opts = {}) {
   saveDataset();
 
   if (!opts.silent) {
-    if (label === NONE_LABEL) {
-      statusMsg = `Added example for NONE (now ${examples[NONE_LABEL].length}) — saved ✅`;
-    } else {
-      statusMsg = `Added example for ${label} (now ${examples[label].length}) — saved ✅`;
-    }
+    statusMsg =
+      label === NONE_LABEL
+        ? `Added example for NONE (now ${examples[NONE_LABEL].length}) — saved ✅`
+        : `Added example for ${label} (now ${examples[label].length}) — saved ✅`;
   }
   return true;
 }
@@ -372,10 +346,7 @@ function saveDataset() {
     savedAt: new Date().toISOString(),
     examples: examples,
     addHistory: addHistory,
-    meta: {
-      feature: "xy_rot_norm",
-      k: K
-    }
+    meta: { feature: "xy_rot_norm", k: K }
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
@@ -415,25 +386,55 @@ function exportDataset() {
     savedAt: new Date().toISOString(),
     examples: examples,
     addHistory: addHistory,
-    meta: {
-      feature: "xy_rot_norm",
-      k: K
-    }
+    meta: { feature: "xy_rot_norm", k: K }
   };
   saveJSON(payload, "asl_handpose_dataset.json");
+}
+
+// Robust JSON extraction for p5 createFileInput
+function parseMaybeJSON(file) {
+  // Case 1: p5 already gave us an object
+  if (file && typeof file.data === "object" && file.data !== null) return file.data;
+
+  // Case 2: raw text JSON
+  if (file && typeof file.data === "string") {
+    const s = file.data.trim();
+
+    // DataURL base64
+    if (s.startsWith("data:")) {
+      const comma = s.indexOf(",");
+      if (comma === -1) throw new Error("Malformed data URL");
+      const meta = s.slice(0, comma);
+      const b64 = s.slice(comma + 1);
+
+      // if it's base64, decode; otherwise it's URL-encoded text
+      if (meta.includes(";base64")) {
+        const txt = atob(b64);
+        return JSON.parse(txt);
+      } else {
+        const txt = decodeURIComponent(b64);
+        return JSON.parse(txt);
+      }
+    }
+
+    // Plain JSON string
+    return JSON.parse(s);
+  }
+
+  throw new Error("File data was empty or unreadable");
 }
 
 function handleImport(file) {
   importInput.hide();
 
-  if (!file || !file.data) {
+  if (!file) {
     statusMsg = "Import cancelled";
     return;
   }
 
   try {
-    const payload = JSON.parse(file.data);
-    if (!payload.examples) throw new Error("Missing examples");
+    const payload = parseMaybeJSON(file);
+    if (!payload || !payload.examples) throw new Error("Missing 'examples' in JSON");
 
     ALL_LABELS.forEach((l) => {
       const arr = payload.examples[l];
@@ -453,7 +454,7 @@ function handleImport(file) {
 
     statusMsg = `Imported ✅ (${totalExamples()} examples)`;
   } catch (e) {
-    statusMsg = "Import failed — invalid JSON";
+    statusMsg = `Import failed — ${e.message || "invalid JSON"}`;
   }
 }
 
@@ -467,7 +468,6 @@ function l2Distance(a, b) {
   return Math.sqrt(s);
 }
 
-// Returns: { label, conf, best, second, scores }
 function classifyKNN(feats) {
   const neighbors = [];
   for (const label of ALL_LABELS) {
@@ -491,10 +491,8 @@ function classifyKNN(feats) {
     scores[label] = (scores[label] || 0) + w;
   }
 
-  let bestLabel = null;
-  let bestScore = -Infinity;
-  let secondLabel = null;
-  let secondScore = -Infinity;
+  let bestLabel = null, bestScore = -Infinity;
+  let secondLabel = null, secondScore = -Infinity;
 
   for (const label of Object.keys(scores)) {
     const s = scores[label];
@@ -513,16 +511,15 @@ function classifyKNN(feats) {
 
   let total = 0;
   for (const s of Object.values(scores)) total += s;
+
   const conf = total > 0 ? bestScore / total : 0;
   const secondConf = total > 0 ? secondScore / total : 0;
   const margin = conf - secondConf;
 
-  // If NONE wins, output NONE
   if (bestLabel === NONE_LABEL) {
     return { label: NONE_LABEL, conf, best: bestLabel, second: secondLabel, scores };
   }
 
-  // If letter wins but low conf or low margin, output NONE
   if (conf < MIN_CONF || margin < MIN_MARGIN) {
     return { label: NONE_LABEL, conf, best: bestLabel, second: secondLabel, scores };
   }
@@ -560,7 +557,7 @@ function drawUI(feats) {
 
   text(
     `Status: ${statusMsg}\n` +
-      `Train: A–Z | NONE: N | Record mode: "-" (${recordMode ? "ON" : "OFF"}) | Undo: . | Export: 1 | Import: 0 | [space] predict ${isPredicting ? "ON" : "OFF"} | Backspace: clear\n` +
+      `Train: A–Z | NONE: N | Record: "-" (${recordMode ? "ON" : "OFF"}) | Undo: . | Export: 1 | Import: 0 | [space] predict ${isPredicting ? "ON" : "OFF"} | Backspace: clear\n` +
       `Hand: ${feats ? "yes" : "no"} | Total: ${totalExamples()} | NONE: ${examples[NONE_LABEL].length}\n` +
       `kNN: k=${K} | gate: conf>=${MIN_CONF}, margin>=${MIN_MARGIN} | REC every ${RECORD_EVERY_MS}ms`,
     35,
@@ -569,6 +566,7 @@ function drawUI(feats) {
 
   const sm = getSmoothedLabel();
   textSize(30);
+
   const shown = sm.label ? sm.label : "—";
   const shownPretty = shown === NONE_LABEL ? "NONE" : shown;
 
