@@ -1,10 +1,10 @@
 ### 22.02.2026 - 26.02.2026
 
-* **Cropped and prepared visual assets for all 26 ASL alphabet gestures
-* **Imported and integrated the visuals into the p5.js project, syncing them with the gesture prediction system
-* **Implemented progression mechanics and a progress bar that cycles through alphabets and advances only after the correct gesture is detected
-* **Developed a Word Mode allowing users to input their name or any word and learn the corresponding gesture sequence
-* **Enhanced overall UI and UX for improved clarity, feedback, and usability ( including a home screen and congratulations page )
+* Cropped and prepared visual assets for all 26 ASL alphabet gestures
+* Imported and integrated the visuals into the p5.js project, syncing them with the gesture prediction system
+* Implemented progression mechanics and a progress bar that cycles through alphabets and advances only after the correct gesture is detected
+* Developed a Word Mode allowing users to input their name or any word and learn the corresponding gesture sequence
+* Enhanced overall UI and UX for improved clarity, feedback, and usability ( including a home screen and congratulations page )
 
 ### 12.02.2026 - 19.02.2026
 
