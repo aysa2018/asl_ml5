@@ -1,4 +1,4 @@
-###22.02.2026 - 26.02.2026
+### 22.02.2026 - 26.02.2026
 
 * **Cropped and prepared visual assets for all 26 ASL alphabet gestures
 * **Imported and integrated the visuals into the p5.js project, syncing them with the gesture prediction system
